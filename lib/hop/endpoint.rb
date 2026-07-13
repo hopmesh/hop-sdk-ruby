@@ -19,6 +19,10 @@ module Hop
   # may arrive later. The DX is HTTP-shaped; delivery is delay-tolerant. core is poll-model, so the
   # endpoint runs a background pump thread (the node is thread-safe).
   class Endpoint
+    # Sentinel pushed to a pending request queue by #close, so a blocked caller fails fast instead of
+    # waiting out its full timeout. A unique object, never equal to a real [status, body] response.
+    CLOSED = Object.new
+
     def initialize(key: nil, tick_ms: 50)
       Hop::FFI.assert_abi!
       @node = key ? Hop::FFI.node_with_secret(key) : Hop::FFI.node_new
@@ -59,7 +63,9 @@ module Hop
       raise "endpoint is closed" unless req_id
 
       begin
-        Timeout.timeout(timeout) { q.pop } # [status, body]
+        res = Timeout.timeout(timeout) { q.pop } # [status, body], or CLOSED if #close woke us
+        raise "endpoint is closed" if res == CLOSED
+        res
       rescue Timeout::Error
         @mutex.synchronize { @pending.delete(req_id) }
         raise "hops://#{service}/#{method} timed out after #{timeout}s"
@@ -117,6 +123,11 @@ module Hop
         @closed = true
       end
       @closers.each { |c| c.call rescue nil } # unblock bearer accept/read threads so they exit
+      # Wake any in-flight request waiters so they fail fast instead of blocking their full timeout.
+      @mutex.synchronize do
+        @pending.each_value { |q| q.push(CLOSED) }
+        @pending.clear
+      end
       @thread.join(1)
       # Free only after @closed is set and the pump has stopped: a late bearer-thread call (a WSS
       # run_link firing #link_down as its socket EOFs) now short-circuits in #with_node instead of
