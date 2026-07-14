@@ -23,7 +23,7 @@ module Hop
     # waiting out its full timeout. A unique object, never equal to a real [status, body] response.
     CLOSED = Object.new
 
-    def initialize(key: nil, tick_ms: 50)
+    def initialize(key: nil, tick_ms: 50, cluster: nil)
       Hop::FFI.assert_abi!
       @node = key ? Hop::FFI.node_with_secret(key) : Hop::FFI.node_new
       Hop::FFI.tick(@node, now_ms)
@@ -35,11 +35,29 @@ module Hop
       @mutex = Mutex.new         # guards @pending
       @node_lock = Monitor.new   # serializes every libhop call on @node vs. #close; reentrant so a
       @closed = false            # reply issued from inside #pump re-enters without deadlocking
+      cluster(cluster) if cluster # dedup across sibling replicas (same identity, no shared store)
       @thread = Thread.new { pump_loop(tick_ms / 1000.0) }
     end
 
     def address = Hop::FFI.to_b58(address_bytes)
     def address_bytes = with_node { |n| Hop::FFI.address(n) }
+
+    # Join the endpoint cluster so sibling replicas (same identity, no shared datastore) each handle a
+    # given request once. Pass a String passphrase (interops with the service's HOP_CLUSTER_SECRET) or
+    # a 32-byte binary String secret. Dedup then applies transparently. Returns self.
+    def cluster(secret_or_passphrase)
+      if secret_or_passphrase.is_a?(String) && secret_or_passphrase.encoding != Encoding::BINARY
+        with_node { |n| Hop::FFI.cluster_join_passphrase(n, secret_or_passphrase) }
+      else
+        b = secret_or_passphrase.to_str
+        raise ArgumentError, "cluster secret must be 32 bytes or a passphrase string" unless b.bytesize == 32
+        with_node { |n| Hop::FFI.cluster_join(n, b) }
+      end
+      self
+    end
+
+    # Live replica count (self + peers within the membership TTL); 1 if not clustered.
+    def cluster_members = with_node { |n| Hop::FFI.cluster_members(n) }
 
     # Register a receiver for a hops:// service. The block gets (req, reply); reply is a callable
     # reply.call(status, body).

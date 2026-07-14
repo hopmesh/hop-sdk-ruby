@@ -56,6 +56,10 @@ module Hop
     ADDRESS_FROM_BASE58    = fn("hop_address_from_base58", [P, P], CH)
     SIGN_REACH_RECORD      = fn("hop_sign_reach_record", [P, P, I, P, P], V)
     VERIFY_REACH_RECORD    = fn("hop_verify_reach_record", [P, SZ, LL, P, P], CH)
+    # Endpoint clustering (DESIGN.md §40).
+    CLUSTER_JOIN            = fn("hop_cluster_join", [P, P], V)
+    CLUSTER_JOIN_PASSPHRASE = fn("hop_cluster_join_passphrase", [P, P, SZ], V)
+    CLUSTER_MEMBERS         = fn("hop_cluster_members", [P], I)
 
     Closure = Fiddle::Closure::BlockCaller
 
@@ -77,6 +81,9 @@ module Hop
     def self.disconnected(node, link) = LINK_DOWN.call(node, link)
     def self.received(node, link, data) = BYTES_RECEIVED.call(node, link, data, data.bytesize)
     def self.subscribe(node, topic) = SUBSCRIBE.call(node, topic)
+    def self.cluster_join(node, secret) = CLUSTER_JOIN.call(node, secret)
+    def self.cluster_join_passphrase(node, pass) = CLUSTER_JOIN_PASSPHRASE.call(node, pass, pass.bytesize)
+    def self.cluster_members(node) = CLUSTER_MEMBERS.call(node)
     def self.publish_prekey(node) = PUBLISH_PREKEY.call(node) != 0
 
     def self.address(node)
