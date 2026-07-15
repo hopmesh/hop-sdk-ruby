@@ -15,6 +15,7 @@ require "hop/discovery"
 module Hop
   module WssBearer
     GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+    MAX_FRAME_BYTES = 1 << 20
 
     @seq = 60_000
     @seq_mutex = Mutex.new
@@ -64,6 +65,7 @@ module Hop
       len = b1 & 0x7F
       len = read_exact(sock, 2).unpack1("n") if len == 126
       len = read_exact(sock, 8).unpack1("Q>") if len == 127
+      raise IOError, "WebSocket frame exceeds 1 MiB" if len > MAX_FRAME_BYTES
       mask = masked ? read_exact(sock, 4) : nil
       payload = read_exact(sock, len)
       payload = apply_mask(payload, mask) if mask

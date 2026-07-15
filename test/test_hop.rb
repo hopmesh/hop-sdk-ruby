@@ -4,8 +4,29 @@ require "minitest/autorun"
 require "hop"
 require "hop/discovery"
 require "hop/dev_tls"
+require "hop/tcp_bearer"
+require "hop/wss_bearer"
+require "stringio"
 
 class TestHop < Minitest::Test
+  def test_wss_frame_cap_rejects_header_without_body
+    header = "\x82\x7f".b + [Hop::WssBearer::MAX_FRAME_BYTES + 1].pack("Q>")
+    assert_raises(IOError) { Hop::WssBearer.read_frame(StringIO.new(header)) }
+  end
+
+  def test_tcp_frame_cap_rejects_header_without_body
+    endpoint = Object.new
+    endpoint.define_singleton_method(:deliver) { raise "oversized frame delivered" }
+    endpoint.define_singleton_method(:link_down) { |_| }
+    reader, writer = Socket.pair(:UNIX, :STREAM, 0)
+    thread = Thread.new { Hop::TcpBearer.recv_loop(endpoint, reader, 1) }
+    writer.write([Hop::TcpBearer::MAX_FRAME_BYTES + 1].pack("N"))
+    assert thread.join(1), "oversized frame left receiver blocked waiting for its body"
+  ensure
+    reader&.close rescue nil
+    writer&.close rescue nil
+  end
+
   def test_reach_record_sign_verify_and_tamper
     e = Hop::Endpoint.new
     rec = e.sign_reach("wss://myaddress.com/_hop", 3600)
@@ -53,7 +74,7 @@ class TestHop < Minitest::Test
   end
 
   def test_cluster_join_and_quorum
-    # DESIGN.md §40: cluster join + CP quorum bindings resolve against libhop and behave. The
+    # Cluster join + TTL visibility threshold bindings resolve against libhop and behave. The
     # cross-replica dedup + hold are proven in the Rust crate; here we exercise the Ruby surface.
     e = Hop::Endpoint.new(cluster: "shared-cluster-passphrase", quorum: 3)
     assert_equal 1, e.cluster_members
