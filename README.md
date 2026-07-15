@@ -58,7 +58,7 @@ ruby examples/client.rb <address> localhost 9944
 
 ## Reachable by name (WSS + discovery)
 
-Make an endpoint reachable at `myaddress.com` with **no new port and no DNSSEC**, using a **pure-stdlib**
+Make an endpoint reachable at `myaddress.com` with **no new port**, using a **pure-stdlib**
 WebSocket bearer (zero gems):
 
 ```ruby
@@ -74,7 +74,7 @@ address = client.dial_by_name("https://myaddress.com")        # WebPKI + self-ce
 status, body = client.request(address, "acme/orders", "create", order)
 ```
 
-Trust, no DNSSEC: `dial_by_name` fetches `/.well-known/hop` (TLS proves the domain), verifies the
+Trust: `dial_by_name` fetches `/.well-known/hop` (TLS proves the domain), verifies the
 self-certifying reach record (signed by the address), dials the WSS, and the Noise handshake confirms
 the address. `test/test_hop.rb` proves the full chain against a self-signed HTTPS server.
 
