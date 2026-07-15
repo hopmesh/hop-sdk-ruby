@@ -60,6 +60,7 @@ module Hop
     CLUSTER_JOIN            = fn("hop_cluster_join", [P, P], V)
     CLUSTER_JOIN_PASSPHRASE = fn("hop_cluster_join_passphrase", [P, P, SZ], V)
     CLUSTER_MEMBERS         = fn("hop_cluster_members", [P], I)
+    CLUSTER_SET_QUORUM      = fn("hop_cluster_set_quorum", [P, I], V)
 
     Closure = Fiddle::Closure::BlockCaller
 
@@ -84,6 +85,7 @@ module Hop
     def self.cluster_join(node, secret) = CLUSTER_JOIN.call(node, secret)
     def self.cluster_join_passphrase(node, pass) = CLUSTER_JOIN_PASSPHRASE.call(node, pass, pass.bytesize)
     def self.cluster_members(node) = CLUSTER_MEMBERS.call(node)
+    def self.cluster_set_quorum(node, min) = CLUSTER_SET_QUORUM.call(node, min)
     def self.publish_prekey(node) = PUBLISH_PREKEY.call(node) != 0
 
     def self.address(node)

@@ -23,7 +23,7 @@ module Hop
     # waiting out its full timeout. A unique object, never equal to a real [status, body] response.
     CLOSED = Object.new
 
-    def initialize(key: nil, tick_ms: 50, cluster: nil)
+    def initialize(key: nil, tick_ms: 50, cluster: nil, quorum: nil)
       Hop::FFI.assert_abi!
       @node = key ? Hop::FFI.node_with_secret(key) : Hop::FFI.node_new
       Hop::FFI.tick(@node, now_ms)
@@ -36,6 +36,7 @@ module Hop
       @node_lock = Monitor.new   # serializes every libhop call on @node vs. #close; reentrant so a
       @closed = false            # reply issued from inside #pump re-enters without deadlocking
       cluster(cluster) if cluster # dedup across sibling replicas (same identity, no shared store)
+      cluster_quorum(quorum) if quorum # hold-until-coordinated (CP); avoids double-processing on split
       @thread = Thread.new { pump_loop(tick_ms / 1000.0) }
     end
 
@@ -58,6 +59,15 @@ module Hop
 
     # Live replica count (self + peers within the membership TTL); 1 if not clustered.
     def cluster_members = with_node { |n| Hop::FFI.cluster_members(n) }
+
+    # Require at least +min+ live cluster members visible before this replica will process a request
+    # (CP: hold-until-coordinated). Under a partition that drops the visible count below +min+, inbound
+    # requests are HELD rather than surfaced, so a split cluster never double-processes. 0 or 1 disables
+    # the hold (the default). Also settable via the +quorum:+ constructor keyword. Returns self.
+    def cluster_quorum(min)
+      with_node { |n| Hop::FFI.cluster_set_quorum(n, min) }
+      self
+    end
 
     # Register a receiver for a hops:// service. The block gets (req, reply); reply is a callable
     # reply.call(status, body).

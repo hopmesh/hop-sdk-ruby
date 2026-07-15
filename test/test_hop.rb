@@ -51,4 +51,14 @@ class TestHop < Minitest::Test
     server&.close
     client&.close
   end
+
+  def test_cluster_join_and_quorum
+    # DESIGN.md §40: cluster join + CP quorum bindings resolve against libhop and behave. The
+    # cross-replica dedup + hold are proven in the Rust crate; here we exercise the Ruby surface.
+    e = Hop::Endpoint.new(cluster: "shared-cluster-passphrase", quorum: 3)
+    assert_equal 1, e.cluster_members
+    assert_same e, e.cluster_quorum(2) # chainable
+  ensure
+    e&.close
+  end
 end
