@@ -1,51 +1,48 @@
-# release: build the gem and push hop-endpoint to RubyGems on a semver tag.
+# Push Gem: publish hop-endpoint to RubyGems on a tag, via RubyGems trusted publishing (OIDC).
 #
-# Inert in the monorepo (root .github/workflows only). Copybara mirrors sdk/ruby to its
-# own repo, where hop-endpoint.gemspec is at the repo root and this becomes the repo-root
-# release workflow.
-name: release
+# Inert in the monorepo (GitHub runs only root .github/workflows). Copybara mirrors sdk/ruby to its own
+# repo, where hop-endpoint.gemspec + Rakefile sit at the repo root and this becomes the repo-root release
+# workflow. The RubyGems trusted publisher must reference THIS workflow file's name (release.yml) and the
+# role below (rubygems.org > gem hop-endpoint > Trusted publishers).
+name: Push Gem
 
-on:
+'on':
   push:
     tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+'
-
-# OIDC trusted publishing (no long-lived key). Configure the trusted publisher on rubygems.org first:
-# gem hop-endpoint, repository hopmesh/hop-sdk-ruby, workflow release.yml.
-permissions:
-  contents: read
-  id-token: write
+      - 'v*'
 
 jobs:
-  publish:
+  push:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
+      - uses: rubygems/configure-rubygems-credentials@main
+        with:
+          role-to-assume: rg_oidc_akr_kwpf5qjgz46ztk3ax3to
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set remote URL
+        run: |
+          # Attribute commits to the last committer on HEAD
+          git config --global user.email "$(git log -1 --pretty=format:'%ae')"
+          git config --global user.name "$(git log -1 --pretty=format:'%an')"
+          git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/$GITHUB_REPOSITORY"
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
         with:
-          ruby-version: '3.3'
-
-      # Guard: the tag (minus its leading v) must equal the gemspec's version, so a
-      # mistyped tag can never publish the wrong version.
-      - name: Verify tag matches gem version
+          bundler-cache: true
+          ruby-version: ruby
+      - name: Release
+        run: bundle exec rake release
+      - name: Wait for release to propagate
         run: |
-          tag="${GITHUB_REF_NAME#v}"
-          ver="$(ruby -e "puts Gem::Specification.load(Dir['*.gemspec'].first).version")"
-          if [ "$tag" != "$ver" ]; then
-            echo "tag $tag does not match gemspec version $ver" >&2
-            exit 1
-          fi
-
-      # Exchange the GitHub OIDC token for a short-lived RubyGems key (trusted publishing).
-      - name: Configure RubyGems OIDC credentials
-        uses: rubygems/configure-rubygems-credentials@v1.0.0
-
-      - name: Build gem
-        run: gem build *.gemspec
-
-      # Token fallback: drop the OIDC step + id-token, add env GEM_HOST_API_KEY: ${{ secrets.RUBYGEMS_API_KEY }}.
-      - name: Push to RubyGems
-        run: gem push *.gem
+          gem install rubygems-await
+          gem_tuple="$(ruby -rbundler/setup -rbundler -e '
+              spec = Bundler.definition.specs.find {|s| s.name == ARGV[0] }
+              raise "No spec for #{ARGV[0]}" unless spec
+              print [spec.name, spec.version, spec.platform].join(":")
+            ' "hop-endpoint")"
+          gem await "${gem_tuple}"
