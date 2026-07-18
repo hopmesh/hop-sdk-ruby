@@ -9,9 +9,77 @@ require "hop/wss_bearer"
 require "stringio"
 
 class TestHop < Minitest::Test
+  def test_every_fixed_width_argument_requires_exactly_32_bytes
+    node = Hop::FFI.node_new
+    Hop::FFI.tick(node, 1)
+    exact = Hop::FFI.address(node)
+    [0, 1, 31, 33].each do |size|
+      invalid = "x".b * size
+      calls = [
+        -> { Hop::FFI.accept_inbox(node, invalid) },
+        -> { Hop::FFI.cluster_join(node, invalid) },
+        -> { Hop::FFI.send_service_request(node, invalid, "svc", "get", "".b) },
+        -> { Hop::FFI.send_service_response(node, invalid, exact, 200, "".b) },
+        -> { Hop::FFI.send_service_response(node, exact, invalid, 200, "".b) },
+        -> { Hop::FFI.to_b58(invalid) },
+        -> { Hop::Endpoint.new(key: invalid) }
+      ]
+      calls.each { |call| assert_raises(ArgumentError, &call) }
+    end
+
+    refute Hop::FFI.accept_inbox(node, exact)
+    Hop::FFI.cluster_join(node, exact)
+    assert_equal 32, Hop::FFI.send_service_request(node, exact, "svc", "get", "".b).bytesize
+    assert Hop::FFI.send_service_response(node, exact, exact, 200, "".b)
+    refute_empty Hop::FFI.to_b58(exact)
+    keyed = Hop::Endpoint.new(key: exact, tick_ms: 1000)
+    keyed.close
+  ensure
+    Hop::FFI.node_free(node) if node
+  end
+
   def test_wss_frame_cap_rejects_header_without_body
     header = "\x82\x7f".b + [Hop::WssBearer::MAX_FRAME_BYTES + 1].pack("Q>")
     assert_raises(IOError) { Hop::WssBearer.read_frame(StringIO.new(header)) }
+  end
+
+  def test_wss_fragmented_cap_is_enforced_before_continuation_body
+    half = Hop::WssBearer::MAX_MESSAGE_BYTES / 2
+    first = ws_frame(false, 0x2, "a".b * (half + 1))
+    oversized_continuation_header = ws_header(true, 0x0, half)
+    assert_raises(IOError) do
+      Hop::WssBearer.read_message(StringIO.new(first + oversized_continuation_header))
+    end
+  end
+
+  def test_wss_fragmented_message_at_cap_materializes_once
+    half = Hop::WssBearer::MAX_MESSAGE_BYTES / 2
+    wire = ws_frame(false, 0x2, "a".b * half) + ws_frame(true, 0x0, "b".b * half)
+    opcode, payload = Hop::WssBearer.read_message(StringIO.new(wire))
+    assert_equal 0x2, opcode
+    assert_equal Hop::WssBearer::MAX_MESSAGE_BYTES, payload.bytesize
+    assert_equal "a", payload.byteslice(0)
+    assert_equal "b", payload.byteslice(-1)
+  end
+
+  def test_wss_header_and_admission_caps_recover_idempotently
+    oversized = "GET /_hop HTTP/1.1\r\nX-Fill: #{'x' * Hop::WssBearer::MAX_HEADER_BYTES}"
+    assert_raises(IOError) { Hop::WssBearer.read_http_head(StringIO.new(oversized)) }
+
+    admission = Hop::WssBearer::Admission.new(Hop::WssBearer::MAX_PENDING_CONNECTIONS)
+    sockets = Array.new(Hop::WssBearer::MAX_PENDING_CONNECTIONS) { Object.new }
+    sockets.each { |sock| sock.define_singleton_method(:close) {} }
+    leases = sockets.map { |sock| admission.acquire(sock) }
+    assert leases.all?
+    assert_nil admission.acquire(Object.new), "cap+1 must be rejected"
+    assert_equal Hop::WssBearer::MAX_PENDING_CONNECTIONS, admission.count
+    leases.first.release
+    leases.first.release
+    replacement = admission.acquire(Object.new)
+    refute_nil replacement, "cleanup must restore exactly one permit"
+    replacement.release
+    leases.drop(1).each(&:release)
+    assert_equal 0, admission.count
   end
 
   def test_tcp_frame_cap_rejects_header_without_body
@@ -62,6 +130,19 @@ class TestHop < Minitest::Test
     server.on("acme/orders") { |req, reply| reply.call(201, req.args) }
     server.attach(port, Hop::DevTls.server_context, public_url) # WSS + well-known in one call
 
+    # A raw TCP peer that never starts TLS and a malformed TLS request occupy/fail workers without
+    # blocking the fixed acceptor pool or killing its next worker.
+    stalled = TCPSocket.new("127.0.0.1", port)
+    malformed_raw = TCPSocket.new("127.0.0.1", port)
+    malformed_ctx = OpenSSL::SSL::SSLContext.new
+    malformed_ctx.verify_mode = OpenSSL::SSL::VERIFY_NONE
+    malformed = OpenSSL::SSL::SSLSocket.new(malformed_raw, malformed_ctx)
+    malformed.sync_close = true
+    malformed.hostname = "localhost"
+    malformed.connect
+    malformed.write("malformed\r\n\r\n")
+    malformed.close
+
     client = Hop::Endpoint.new
     address = client.dial_by_name("https://localhost:#{port}", insecure_tls: true)
     assert_equal server.address, address
@@ -69,6 +150,8 @@ class TestHop < Minitest::Test
     assert_equal 201, status
     assert_equal "widget", body
   ensure
+    stalled&.close rescue nil
+    malformed&.close rescue nil
     server&.close
     client&.close
   end
@@ -81,5 +164,23 @@ class TestHop < Minitest::Test
     assert_same e, e.cluster_quorum(2) # chainable
   ensure
     e&.close
+  end
+
+
+  private
+
+  def ws_header(final, opcode, len)
+    first = (final ? 0x80 : 0) | opcode
+    if len < 126
+      [first, len].pack("CC")
+    elsif len < 65_536
+      [first, 126, len].pack("CCn")
+    else
+      [first, 127].pack("CC") + [len].pack("Q>")
+    end
+  end
+
+  def ws_frame(final, opcode, payload)
+    ws_header(final, opcode, payload.bytesize) + payload
   end
 end

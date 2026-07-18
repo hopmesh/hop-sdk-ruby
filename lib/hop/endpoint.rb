@@ -25,6 +25,9 @@ module Hop
 
     def initialize(key: nil, tick_ms: 50, cluster: nil, quorum: nil)
       Hop::FFI.assert_abi!
+      if key && key.bytesize != 32
+        raise ArgumentError, "identity key must be exactly 32 bytes, got #{key.bytesize}"
+      end
       @node = key ? Hop::FFI.node_with_secret(key) : Hop::FFI.node_new
       Hop::FFI.tick(@node, now_ms)
       Hop::FFI.publish_prekey(@node)
@@ -92,6 +95,8 @@ module Hop
       begin
         res = Timeout.timeout(timeout) { q.pop } # [status, body], or CLOSED if #close woke us
         raise "endpoint is closed" if res == CLOSED
+        accepted = with_node { |n| Hop::FFI.accept_service_response(n, req_id) }
+        raise "service response acceptance failed" unless accepted
         res
       rescue Timeout::Error
         @mutex.synchronize { @pending.delete(req_id) }

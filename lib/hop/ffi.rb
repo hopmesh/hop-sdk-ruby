@@ -13,7 +13,7 @@ module Hop
     CH = Fiddle::TYPE_CHAR
     V  = Fiddle::TYPE_VOID
 
-    ABI_EXPECTED = 3
+    ABI_EXPECTED = 4
 
     def self.lib_path
       ext = case RbConfig::CONFIG["host_os"]
@@ -48,10 +48,12 @@ module Hop
     DRAIN_OUTGOING         = fn("hop_drain_outgoing", [P, P, P], V)
     SUBSCRIBE              = fn("hop_subscribe", [P, P], V)
     PUBLISH_PREKEY         = fn("hop_publish_prekey", [P], CH)
+    ACCEPT_INBOX           = fn("hop_accept_inbox", [P, P], CH)
     SEND_SERVICE_REQUEST   = fn("hop_send_service_request", [P, P, P, P, P, SZ, P], CH)
     SEND_SERVICE_RESPONSE  = fn("hop_send_service_response", [P, P, P, I, P, SZ], CH)
     POLL_SERVICE_REQUESTS  = fn("hop_poll_service_requests", [P, P, P], V)
     POLL_SERVICE_RESPONSES = fn("hop_poll_service_responses", [P, P, P], V)
+    ACCEPT_SERVICE_RESPONSE = fn("hop_accept_service_response", [P, P], CH)
     ADDRESS_TO_BASE58      = fn("hop_address_to_base58", [P, P, SZ], SZ)
     ADDRESS_FROM_BASE58    = fn("hop_address_from_base58", [P, P], CH)
     SIGN_REACH_RECORD      = fn("hop_sign_reach_record", [P, P, I, P, P], V)
@@ -69,6 +71,13 @@ module Hop
       raise "libhop ABI mismatch: wrapper expects #{ABI_EXPECTED}, library reports #{got}" if got != ABI_EXPECTED
     end
 
+    def self.require_32(value, name)
+      raise ArgumentError, "#{name} must be exactly 32 bytes, got #{value.bytesize}" unless value.bytesize == 32
+
+      value
+    end
+    private_class_method :require_32
+
     # ---- helpers: read C memory that is valid only during a call ----
     def self.read_bytes(ptr, len) = len.zero? ? "".b : Fiddle::Pointer.new(ptr)[0, len].b
     def self.read_cstr(ptr) = Fiddle::Pointer.new(ptr).to_s
@@ -82,11 +91,14 @@ module Hop
     def self.disconnected(node, link) = LINK_DOWN.call(node, link)
     def self.received(node, link, data) = BYTES_RECEIVED.call(node, link, data, data.bytesize)
     def self.subscribe(node, topic) = SUBSCRIBE.call(node, topic)
-    def self.cluster_join(node, secret) = CLUSTER_JOIN.call(node, secret)
+    def self.cluster_join(node, secret) = CLUSTER_JOIN.call(node, require_32(secret, "cluster secret"))
     def self.cluster_join_passphrase(node, pass) = CLUSTER_JOIN_PASSPHRASE.call(node, pass, pass.bytesize)
     def self.cluster_members(node) = CLUSTER_MEMBERS.call(node)
     def self.cluster_set_quorum(node, min) = CLUSTER_SET_QUORUM.call(node, min)
     def self.publish_prekey(node) = PUBLISH_PREKEY.call(node) != 0
+    def self.accept_inbox(node, inbox_id)
+      ACCEPT_INBOX.call(node, require_32(inbox_id, "inbox id")) != 0
+    end
 
     def self.address(node)
       out = Fiddle::Pointer.malloc(32, Fiddle::RUBY_FREE)
@@ -103,14 +115,19 @@ module Hop
 
     def self.send_service_request(node, dst, service, method, args)
       out = Fiddle::Pointer.malloc(32, Fiddle::RUBY_FREE)
-      ok = SEND_SERVICE_REQUEST.call(node, dst, service, method, args, args.bytesize, out) != 0
+      ok = SEND_SERVICE_REQUEST.call(node, require_32(dst, "destination"), service, method, args, args.bytesize, out) != 0
       raise "hop_send_service_request failed" unless ok
 
       out[0, 32].b
     end
 
     def self.send_service_response(node, to, for_request_id, status, body)
-      SEND_SERVICE_RESPONSE.call(node, to, for_request_id, status, body, body.bytesize) != 0
+      SEND_SERVICE_RESPONSE.call(node, require_32(to, "response destination"),
+                                 require_32(for_request_id, "request id"), status, body, body.bytesize) != 0
+    end
+
+    def self.accept_service_response(node, request_id)
+      ACCEPT_SERVICE_RESPONSE.call(node, require_32(request_id, "request id")) != 0
     end
 
     def self.take_service_requests(node)
@@ -124,8 +141,9 @@ module Hop
 
     def self.take_service_responses(node)
       out = []
-      sink = Closure.new(V, [P, P, P, I, P, SZ]) do |_ctx, frm, for_id, status, body, body_len|
+      sink = Closure.new(CH, [P, P, P, I, P, SZ]) do |_ctx, frm, for_id, status, body, body_len|
         out << [read_bytes(frm, 32), read_bytes(for_id, 32), status & 0xFFFF, read_bytes(body, body_len)]
+        0
       end
       POLL_SERVICE_RESPONSES.call(node, sink, nil)
       out
@@ -133,7 +151,7 @@ module Hop
 
     def self.to_b58(addr32)
       out = Fiddle::Pointer.malloc(64, Fiddle::RUBY_FREE)
-      n = ADDRESS_TO_BASE58.call(addr32, out, 64)
+      n = ADDRESS_TO_BASE58.call(require_32(addr32, "address"), out, 64)
       out[0, n]
     end
 

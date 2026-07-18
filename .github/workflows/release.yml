@@ -1,48 +1,84 @@
-# Push Gem: publish hop-endpoint to RubyGems on a tag, via RubyGems trusted publishing (OIDC).
-#
-# Inert in the monorepo (GitHub runs only root .github/workflows). Copybara mirrors sdk/ruby to its own
-# repo, where hop-endpoint.gemspec + Rakefile sit at the repo root and this becomes the repo-root release
-# workflow. The RubyGems trusted publisher must reference THIS workflow file's name (release.yml) and the
-# role below (rubygems.org > gem hop-endpoint > Trusted publishers).
-name: Push Gem
+# Build the gem without publication credentials, then push only its verified artifact.
+name: release
 
-'on':
+on:
   push:
     tags:
-      - 'v*'
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: read
 
 jobs:
-  push:
+  build:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ruby/setup-ruby@003a5c4d8d6321bd302e38f6f0ec593f77f06600 # v1.319.0
+        with:
+          ruby-version: '3.3.12'
+      - name: Verify version and build gem
+        run: |
+          set -euo pipefail
+          version="$(ruby -e "puts Gem::Specification.load(Dir['*.gemspec'].first).version")"
+          test "${GITHUB_REF_NAME#v}" = "$version"
+          mkdir "$RUNNER_TEMP/release"
+          gem build hop-endpoint.gemspec --output "$RUNNER_TEMP/release/hop-endpoint-$version.gem"
+          python3 .github/release-artifact.py create --directory "$RUNNER_TEMP/release"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    environment: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
       id-token: write
     steps:
-      - uses: rubygems/configure-rubygems-credentials@main
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Mint canonical-source read token
+        id: source-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        with:
+          app-id: ${{ secrets.HOP_SOURCE_APP_ID }}
+          private-key: ${{ secrets.HOP_SOURCE_APP_PRIVATE_KEY }}
+          owner: hopmesh
+          repositories: hop
+          permission-actions: read
+          permission-checks: read
+          permission-contents: read
+      - name: Verify canonical source provenance
+        id: provenance
+        env:
+          SOURCE_TOKEN: ${{ steps.source-token.outputs.token }}
+        run: python3 .github/release-provenance.py --component hop-sdk-ruby --github-output "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release
+      - name: Verify immutable gem artifact
+        run: >-
+          python3 .github/release-artifact.py verify --directory "$RUNNER_TEMP/release"
+          --canonical-source-sha '${{ steps.provenance.outputs.source_sha }}'
+      - uses: ruby/setup-ruby@003a5c4d8d6321bd302e38f6f0ec593f77f06600 # v1.319.0
+        with:
+          ruby-version: '3.3.12'
+      - name: Configure RubyGems OIDC credentials after verification
+        uses: rubygems/configure-rubygems-credentials@dc5a8d8553e6ee01fc26761a49e99e733d17954a # v2.1.0
         with:
           role-to-assume: rg_oidc_akr_kwpf5qjgz46ztk3ax3to
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - name: Set remote URL
-        run: |
-          # Attribute commits to the last committer on HEAD
-          git config --global user.email "$(git log -1 --pretty=format:'%ae')"
-          git config --global user.name "$(git log -1 --pretty=format:'%an')"
-          git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/$GITHUB_REPOSITORY"
-      - name: Set up Ruby
-        uses: ruby/setup-ruby@v1
-        with:
-          bundler-cache: true
-          ruby-version: ruby
-      - name: Release
-        run: bundle exec rake release
-      - name: Wait for release to propagate
-        run: |
-          gem install rubygems-await
-          gem_tuple="$(ruby -rbundler/setup -rbundler -e '
-              spec = Bundler.definition.specs.find {|s| s.name == ARGV[0] }
-              raise "No spec for #{ARGV[0]}" unless spec
-              print [spec.name, spec.version, spec.platform].join(":")
-            ' "hop-endpoint")"
-          gem await "${gem_tuple}"
+      - name: Push verified gem
+        run: gem push "$RUNNER_TEMP/release/"*.gem

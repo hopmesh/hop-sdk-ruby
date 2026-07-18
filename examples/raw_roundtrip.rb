@@ -45,6 +45,7 @@ F.send_service_response(b, frm, rid, 200, "stored")
 pump(a, b)
 
 _rf, for_id, status, body = F.take_service_responses(a).first
+F.accept_service_response(a, for_id)
 puts "A got response: #{status} #{body}  ties to reqId: #{for_id == req_id}"
 
 passed = service == "weather" && status == 200 && body == "stored" && for_id == req_id
